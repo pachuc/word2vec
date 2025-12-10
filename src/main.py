@@ -46,6 +46,18 @@ def main():
 
         if (epoch + 1) % 20 == 0:
             print(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(dataloader):.4f}")
+    
+    print("Training complete. Saving model checkpoint...")
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': total_loss,
+        'vocab': vocab,
+        'idx_to_word': idx_to_word,
+        'embedding_dim': embedding_dim,
+    }, 'checkpoint.pt')
+    print("Done!")
 
 
 if __name__ == "__main__":
