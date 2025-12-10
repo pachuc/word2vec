@@ -1,5 +1,3 @@
-import os
-
 class TextIterator:
     def __init__(self, filepath: str, chunk_size: int = 1024 * 1024):
         """
@@ -19,7 +17,7 @@ class TextIterator:
                 
                 if not chunk:
                     if buffer:
-                        yield buffer # buffer is always a contiguous chunk with no spaces
+                        yield [buffer] # buffer is always a contiguous chunk with no spaces
                     break
 
                 text_block = buffer + chunk

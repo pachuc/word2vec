@@ -24,7 +24,7 @@ class VocabBuilder:
         vocab = {}
         idx_to_word = {}
         idx = 0
-        for word, count in self.word_counts.items():
+        for word, count in self.word_counts.most_common():
             if count >= self.min_freq:
                 vocab[word] = idx
                 idx_to_word[idx] = word

@@ -6,6 +6,7 @@ from subsampler import Subsampler
 from negative_sampler import NegativeSampler
 from word2vec_model import Word2VecModel
 
+import torch
 from torch import optim
 
 CORPUS = '../data/text8'
@@ -18,6 +19,9 @@ LEARNING_RATE = 0.01
 EPOCHS = 100
 
 def main():
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
     print("Building vocabulary...")
     text_iterator = TextIterator(CORPUS)
     vocab_builder = VocabBuilder(text_iterator, min_freq=MIN_WORD_FREQ, max_vocab_size=MAX_VOCAB_SIZE)
@@ -31,21 +35,32 @@ def main():
 
     print("Initializing model and optimizer...")
     model = Word2VecModel(vocab_size=len(vocab), embedding_dim=EMBEDDING_DIM)
+    model = model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
     print("Starting training...")
     # Training
     for epoch in range(EPOCHS):
         total_loss = 0
+        batch_count = 0
+
         for center, context, negatives in dataloader:
+            center = center.to(device)
+            context = context.to(device)
+            negatives = negatives.to(device)
+            
             optimizer.zero_grad()
             loss = model(center, context, negatives)
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
 
+            batch_count += 1
+            if batch_count % 1000 == 0:
+                print(f"Epoch {epoch+1}, Batch {batch_count}, Loss: {loss.item():.4f}")
+
         if (epoch + 1) % 20 == 0:
-            print(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(dataloader):.4f}")
+            print(f"Epoch {epoch+1}/{EPOCHS}, Loss: {total_loss/batch_count:.4f}")
     
     print("Training complete. Saving model checkpoint...")
     torch.save({
@@ -55,7 +70,7 @@ def main():
         'loss': total_loss,
         'vocab': vocab,
         'idx_to_word': idx_to_word,
-        'embedding_dim': embedding_dim,
+        'embedding_dim': EMBEDDING_DIM,
     }, 'checkpoint.pt')
     print("Done!")
 
