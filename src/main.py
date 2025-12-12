@@ -15,8 +15,8 @@ MAX_VOCAB_SIZE = 50000
 BATCH_SIZE = 512
 WINDOW_SIZE = 5
 EMBEDDING_DIM = 100
-LEARNING_RATE = 0.01
-EPOCHS = 100
+LEARNING_RATE = 0.001
+EPOCHS = 15
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
