@@ -10,15 +10,30 @@ import click
 import torch
 import torch.nn.functional as F
 from torch import optim
+import yaml
+import os
+from dataclasses import dataclass
 
-CORPUS = '../data/text8'
-MIN_WORD_FREQ = 5
-MAX_VOCAB_SIZE = 50000
-BATCH_SIZE = 512
-WINDOW_SIZE = 5
-EMBEDDING_DIM = 100
-LEARNING_RATE = 0.001
-EPOCHS = 15
+DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), '..', 'config.yaml')
+
+
+@dataclass
+class Config:
+    corpus: str
+    min_word_freq: int
+    max_vocab_size: int
+    batch_size: int
+    window_size: int
+    embedding_dim: int
+    learning_rate: float
+    epochs: int
+
+
+def load_config(config_path):
+    """Load configuration from a YAML file."""
+    with open(config_path, 'r') as f:
+        data = yaml.safe_load(f)
+    return Config(**data)
 
 
 @click.group()
@@ -28,30 +43,33 @@ def cli():
 
 
 @cli.command()
+@click.option('--config', default=DEFAULT_CONFIG_PATH, help='Path to config file')
 @click.option('--checkpoint-path', default='checkpoint.pt', help='Path to save model checkpoint')
-def train(checkpoint_path):
+def train(config, checkpoint_path):
     """Train the Word2Vec model."""
+    cfg = load_config(config)
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     click.echo(f"Using device: {device}")
 
     click.echo("Building vocabulary...")
-    text_iterator = TextIterator(CORPUS)
-    vocab_builder = VocabBuilder(text_iterator, min_freq=MIN_WORD_FREQ, max_vocab_size=MAX_VOCAB_SIZE)
+    text_iterator = TextIterator(cfg.corpus)
+    vocab_builder = VocabBuilder(text_iterator, min_freq=cfg.min_word_freq, max_vocab_size=cfg.max_vocab_size)
     vocab, idx_to_word, word_counts = vocab_builder.build_vocab()
 
     click.echo("Setting up dataset and dataloader...")
     subsampler = Subsampler(word_counts)
     negative_sampler = NegativeSampler(word_counts, vocab)
-    dataset = StreamingSkipGramDataset(text_iterator, subsampler, negative_sampler, vocab, window_size=WINDOW_SIZE)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE)
+    dataset = StreamingSkipGramDataset(text_iterator, subsampler, negative_sampler, vocab, window_size=cfg.window_size)
+    dataloader = DataLoader(dataset, batch_size=cfg.batch_size)
 
     click.echo("Initializing model and optimizer...")
-    model = Word2VecModel(vocab_size=len(vocab), embedding_dim=EMBEDDING_DIM)
+    model = Word2VecModel(vocab_size=len(vocab), embedding_dim=cfg.embedding_dim)
     model = model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optimizer = optim.Adam(model.parameters(), lr=cfg.learning_rate)
 
     click.echo("Starting training...")
-    for epoch in range(EPOCHS):
+    for epoch in range(cfg.epochs):
         total_loss = 0
         batch_count = 0
 
@@ -71,7 +89,7 @@ def train(checkpoint_path):
                 click.echo(f"Epoch {epoch+1}, Batch {batch_count}, Loss: {loss.item():.4f}")
 
         if (epoch + 1) % 20 == 0:
-            click.echo(f"Epoch {epoch+1}/{EPOCHS}, Loss: {total_loss/batch_count:.4f}")
+            click.echo(f"Epoch {epoch+1}/{cfg.epochs}, Loss: {total_loss/batch_count:.4f}")
 
     click.echo(f"Training complete. Saving model checkpoint to {checkpoint_path}...")
     torch.save({
@@ -81,7 +99,7 @@ def train(checkpoint_path):
         'loss': total_loss,
         'vocab': vocab,
         'idx_to_word': idx_to_word,
-        'embedding_dim': EMBEDDING_DIM,
+        'embedding_dim': cfg.embedding_dim,
     }, checkpoint_path)
     click.echo("Done!")
 
