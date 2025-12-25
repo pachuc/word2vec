@@ -111,11 +111,8 @@ def train(config, checkpoint_path, resume_from):
             total_loss += loss.item()
 
             batch_count += 1
-            if batch_count % 1000 == 0:
-                click.echo(f"Epoch {epoch+1}, Batch {batch_count}, Loss: {loss.item():.4f}")
 
-        if (epoch + 1) % 20 == 0:
-            click.echo(f"Epoch {epoch+1}/{total_epochs}, Loss: {total_loss/batch_count:.4f}")
+        click.echo(f"Epoch {epoch+1}/{total_epochs}, Loss: {total_loss/batch_count:.4f}")
 
     click.echo(f"Training complete. Saving model checkpoint to {checkpoint_path}...")
     torch.save({

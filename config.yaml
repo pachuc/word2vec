@@ -3,8 +3,8 @@
 corpus: "data/text8"
 min_word_freq: 5
 max_vocab_size: 50000
-batch_size: 512
+batch_size: 1024
 window_size: 10
 embedding_dim: 300
-learning_rate: 0.001
-epochs: 25
+learning_rate: 0.01
+epochs: 5
