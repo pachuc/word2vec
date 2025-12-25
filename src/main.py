@@ -1,6 +1,7 @@
 from text_iterator import TextIterator
 from vocab_builder import VocabBuilder
-from streaming_skip_gram_dataset import StreamingSkipGramDataset
+from skip_gram_dataset import SkipGramDataset
+from preprocessor import SkipGramPreprocessor
 from torch.utils.data import DataLoader
 from subsampler import Subsampler
 from negative_sampler import NegativeSampler
@@ -44,10 +45,59 @@ def cli():
 
 @cli.command()
 @click.option('--config', default=DEFAULT_CONFIG_PATH, help='Path to config file')
+@click.option('--output-dir', default='preprocessed', help='Directory to save preprocessed data')
+def preprocess(config, output_dir):
+    """Preprocess corpus and generate skip-gram pairs for fast training."""
+    cfg = load_config(config)
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    click.echo("Building vocabulary...")
+    text_iterator = TextIterator(cfg.corpus)
+    vocab_builder = VocabBuilder(text_iterator, min_freq=cfg.min_word_freq, max_vocab_size=cfg.max_vocab_size)
+    vocab, idx_to_word, word_counts = vocab_builder.build_vocab()
+    click.echo(f"Vocabulary size: {len(vocab)}")
+
+    click.echo("Generating skip-gram pairs...")
+    text_iterator = TextIterator(cfg.corpus)  # Reset iterator
+    subsampler = Subsampler(word_counts)
+    preprocessor = SkipGramPreprocessor(
+        text_iterator, vocab, subsampler,
+        window_size=cfg.window_size, use_random_window=True
+    )
+
+    def progress(chunks, pairs):
+        click.echo(f"  Processed {chunks} chunks, {pairs:,} pairs so far...")
+
+    pairs = preprocessor.generate_pairs(progress_callback=progress)
+    click.echo(f"Generated {len(pairs):,} skip-gram pairs")
+
+    # Save pairs
+    pairs_path = os.path.join(output_dir, 'pairs.npy')
+    preprocessor.save_pairs(pairs, pairs_path)
+    click.echo(f"Saved pairs to {pairs_path}")
+
+    # Save vocabulary data
+    vocab_path = os.path.join(output_dir, 'vocab.pt')
+    torch.save({
+        'vocab': vocab,
+        'idx_to_word': idx_to_word,
+        'word_counts': word_counts,
+    }, vocab_path)
+    click.echo(f"Saved vocabulary to {vocab_path}")
+
+    click.echo("Preprocessing complete!")
+
+
+@cli.command()
+@click.option('--config', default=DEFAULT_CONFIG_PATH, help='Path to config file')
 @click.option('--checkpoint-path', default='checkpoint.pt', help='Path to save model checkpoint')
 @click.option('--resume-from', default=None, help='Path to checkpoint file to resume training from')
-def train(config, checkpoint_path, resume_from):
-    """Train the Word2Vec model."""
+@click.option('--pairs-path', default=None, help='Path to preprocessed pairs.npy file')
+@click.option('--vocab-path', default=None, help='Path to preprocessed vocab.pt file')
+@click.option('--num-workers', default=4, help='Number of dataloader workers')
+def train(config, checkpoint_path, resume_from, pairs_path, vocab_path, num_workers):
+    """Train the Word2Vec model using preprocessed data."""
     cfg = load_config(config)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -58,30 +108,49 @@ def train(config, checkpoint_path, resume_from):
     if resume_from:
         click.echo(f"Loading checkpoint from {resume_from}...")
         checkpoint = torch.load(resume_from, map_location=device, weights_only=False)
-        vocab = checkpoint['vocab']
-        idx_to_word = checkpoint['idx_to_word']
-        word_counts = checkpoint.get('word_counts')
         start_epoch = checkpoint['epoch'] + 1
         click.echo(f"Resuming from epoch {start_epoch}")
 
-        # Rebuild text iterator for dataset
-        text_iterator = TextIterator(cfg.corpus)
-
-        if word_counts is None:
-            click.echo("Rebuilding word counts from corpus...")
-            vocab_builder = VocabBuilder(text_iterator, min_freq=cfg.min_word_freq, max_vocab_size=cfg.max_vocab_size)
-            _, _, word_counts = vocab_builder.build_vocab()
+        # Use paths from checkpoint if not explicitly provided
+        if pairs_path is None:
+            pairs_path = checkpoint['pairs_path']
+        if vocab_path is None:
+            vocab_path = checkpoint['vocab_path']
+        click.echo(f"Using pairs: {pairs_path}")
+        click.echo(f"Using vocab: {vocab_path}")
     else:
-        click.echo("Building vocabulary...")
-        text_iterator = TextIterator(cfg.corpus)
-        vocab_builder = VocabBuilder(text_iterator, min_freq=cfg.min_word_freq, max_vocab_size=cfg.max_vocab_size)
-        vocab, idx_to_word, word_counts = vocab_builder.build_vocab()
+        # Fresh training requires both paths
+        if pairs_path is None or vocab_path is None:
+            raise click.ClickException(
+                "For new training, both --pairs-path and --vocab-path are required. "
+                "Run 'python main.py preprocess' first to generate these files."
+            )
+
+    # Validate paths exist
+    if not os.path.exists(pairs_path):
+        raise click.ClickException(f"Pairs file not found: {pairs_path}")
+    if not os.path.exists(vocab_path):
+        raise click.ClickException(f"Vocab file not found: {vocab_path}")
+
+    click.echo(f"Loading vocabulary from {vocab_path}...")
+    vocab_data = torch.load(vocab_path, weights_only=False)
+    vocab = vocab_data['vocab']
+    idx_to_word = vocab_data['idx_to_word']
+    word_counts = vocab_data['word_counts']
+    click.echo(f"Vocabulary size: {len(vocab)}")
 
     click.echo("Setting up dataset and dataloader...")
-    subsampler = Subsampler(word_counts)
     negative_sampler = NegativeSampler(word_counts, vocab)
-    dataset = StreamingSkipGramDataset(text_iterator, subsampler, negative_sampler, vocab, window_size=cfg.window_size)
-    dataloader = DataLoader(dataset, batch_size=cfg.batch_size)
+    dataset = SkipGramDataset(pairs_path, negative_sampler, num_negatives=5)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True if num_workers > 0 else False
+    )
+    click.echo(f"Loaded {len(dataset):,} training pairs, {num_workers} workers")
 
     click.echo("Initializing model and optimizer...")
     model = Word2VecModel(vocab_size=len(vocab), embedding_dim=cfg.embedding_dim)
@@ -124,6 +193,8 @@ def train(config, checkpoint_path, resume_from):
         'idx_to_word': idx_to_word,
         'word_counts': word_counts,
         'embedding_dim': cfg.embedding_dim,
+        'pairs_path': pairs_path,
+        'vocab_path': vocab_path,
     }, checkpoint_path)
     click.echo("Done!")
 
