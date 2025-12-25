@@ -45,17 +45,37 @@ def cli():
 @cli.command()
 @click.option('--config', default=DEFAULT_CONFIG_PATH, help='Path to config file')
 @click.option('--checkpoint-path', default='checkpoint.pt', help='Path to save model checkpoint')
-def train(config, checkpoint_path):
+@click.option('--resume-from', default=None, help='Path to checkpoint file to resume training from')
+def train(config, checkpoint_path, resume_from):
     """Train the Word2Vec model."""
     cfg = load_config(config)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     click.echo(f"Using device: {device}")
 
-    click.echo("Building vocabulary...")
-    text_iterator = TextIterator(cfg.corpus)
-    vocab_builder = VocabBuilder(text_iterator, min_freq=cfg.min_word_freq, max_vocab_size=cfg.max_vocab_size)
-    vocab, idx_to_word, word_counts = vocab_builder.build_vocab()
+    start_epoch = 0
+
+    if resume_from:
+        click.echo(f"Loading checkpoint from {resume_from}...")
+        checkpoint = torch.load(resume_from, map_location=device, weights_only=False)
+        vocab = checkpoint['vocab']
+        idx_to_word = checkpoint['idx_to_word']
+        word_counts = checkpoint.get('word_counts')
+        start_epoch = checkpoint['epoch'] + 1
+        click.echo(f"Resuming from epoch {start_epoch}")
+
+        # Rebuild text iterator for dataset
+        text_iterator = TextIterator(cfg.corpus)
+
+        if word_counts is None:
+            click.echo("Rebuilding word counts from corpus...")
+            vocab_builder = VocabBuilder(text_iterator, min_freq=cfg.min_word_freq, max_vocab_size=cfg.max_vocab_size)
+            _, _, word_counts = vocab_builder.build_vocab()
+    else:
+        click.echo("Building vocabulary...")
+        text_iterator = TextIterator(cfg.corpus)
+        vocab_builder = VocabBuilder(text_iterator, min_freq=cfg.min_word_freq, max_vocab_size=cfg.max_vocab_size)
+        vocab, idx_to_word, word_counts = vocab_builder.build_vocab()
 
     click.echo("Setting up dataset and dataloader...")
     subsampler = Subsampler(word_counts)
@@ -68,8 +88,14 @@ def train(config, checkpoint_path):
     model = model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=cfg.learning_rate)
 
-    click.echo("Starting training...")
-    for epoch in range(cfg.epochs):
+    if resume_from:
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        click.echo("Loaded model and optimizer state from checkpoint")
+
+    total_epochs = start_epoch + cfg.epochs
+    click.echo(f"Starting training from epoch {start_epoch} to {total_epochs}...")
+    for epoch in range(start_epoch, total_epochs):
         total_loss = 0
         batch_count = 0
 
@@ -89,7 +115,7 @@ def train(config, checkpoint_path):
                 click.echo(f"Epoch {epoch+1}, Batch {batch_count}, Loss: {loss.item():.4f}")
 
         if (epoch + 1) % 20 == 0:
-            click.echo(f"Epoch {epoch+1}/{cfg.epochs}, Loss: {total_loss/batch_count:.4f}")
+            click.echo(f"Epoch {epoch+1}/{total_epochs}, Loss: {total_loss/batch_count:.4f}")
 
     click.echo(f"Training complete. Saving model checkpoint to {checkpoint_path}...")
     torch.save({
@@ -99,6 +125,7 @@ def train(config, checkpoint_path):
         'loss': total_loss,
         'vocab': vocab,
         'idx_to_word': idx_to_word,
+        'word_counts': word_counts,
         'embedding_dim': cfg.embedding_dim,
     }, checkpoint_path)
     click.echo("Done!")
