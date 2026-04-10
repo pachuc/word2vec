@@ -13,7 +13,42 @@ import torch.nn.functional as F
 from torch import optim
 import yaml
 import os
+import sys
+import threading
+import select
+import termios
+import tty
 from dataclasses import dataclass
+
+
+class KeyboardListener:
+    """Listens for 'q' keypress in a background thread to allow graceful shutdown."""
+
+    def __init__(self):
+        self.should_stop = False
+        self._thread = None
+        self._old_settings = None
+
+    def start(self):
+        if not sys.stdin.isatty():
+            return
+        self._old_settings = termios.tcgetattr(sys.stdin)
+        tty.setcbreak(sys.stdin.fileno())
+        self._thread = threading.Thread(target=self._listen, daemon=True)
+        self._thread.start()
+
+    def _listen(self):
+        while not self.should_stop:
+            if select.select([sys.stdin], [], [], 0.1)[0]:
+                char = sys.stdin.read(1)
+                if char.lower() == 'q':
+                    self.should_stop = True
+                    break
+
+    def stop(self):
+        self.should_stop = True
+        if self._old_settings:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self._old_settings)
 
 DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), '..', 'config.yaml')
 
@@ -162,8 +197,29 @@ def train(config, checkpoint_path, resume_from, pairs_path, vocab_path, num_work
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         click.echo("Loaded model and optimizer state from checkpoint")
 
+    def save_checkpoint(epoch, total_loss):
+        click.echo(f"Saving model checkpoint to {checkpoint_path}...")
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': total_loss,
+            'vocab': vocab,
+            'idx_to_word': idx_to_word,
+            'word_counts': word_counts,
+            'embedding_dim': cfg.embedding_dim,
+            'pairs_path': pairs_path,
+            'vocab_path': vocab_path,
+        }, checkpoint_path)
+
+    keyboard = KeyboardListener()
+    keyboard.start()
+
     total_epochs = start_epoch + cfg.epochs
     click.echo(f"Starting training from epoch {start_epoch} to {total_epochs}...")
+    click.echo("Press 'q' to stop training gracefully and save checkpoint.")
+
+    stopped_early = False
     for epoch in range(start_epoch, total_epochs):
         total_loss = 0
         batch_count = 0
@@ -181,21 +237,25 @@ def train(config, checkpoint_path, resume_from, pairs_path, vocab_path, num_work
 
             batch_count += 1
 
-        click.echo(f"Epoch {epoch+1}/{total_epochs}, Loss: {total_loss/batch_count:.4f}")
+            if keyboard.should_stop:
+                click.echo("\nStopping training gracefully...")
+                stopped_early = True
+                break
 
-    click.echo(f"Training complete. Saving model checkpoint to {checkpoint_path}...")
-    torch.save({
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'loss': total_loss,
-        'vocab': vocab,
-        'idx_to_word': idx_to_word,
-        'word_counts': word_counts,
-        'embedding_dim': cfg.embedding_dim,
-        'pairs_path': pairs_path,
-        'vocab_path': vocab_path,
-    }, checkpoint_path)
+        avg_loss = total_loss / batch_count if batch_count > 0 else 0
+        click.echo(f"Epoch {epoch+1}/{total_epochs}, Loss: {avg_loss:.4f}")
+
+        if stopped_early:
+            break
+
+    keyboard.stop()
+
+    if stopped_early:
+        click.echo("Training interrupted by user.")
+    else:
+        click.echo("Training complete.")
+
+    save_checkpoint(epoch, total_loss)
     click.echo("Done!")
 
 
@@ -249,6 +309,16 @@ def similar(checkpoint_path, top_n):
         for i, (similar_word, score) in enumerate(results, 1):
             click.echo(f"  {i:2}. {similar_word:<20} {score:.4f}")
         click.echo()
+
+
+@cli.command()
+@click.option('--checkpoint-path', required=True, help='Path to model checkpoint')
+@click.option('--host', default='127.0.0.1', help='Host to bind to')
+@click.option('--port', default=5000, help='Port to bind to')
+def webui(checkpoint_path, host, port):
+    """Launch web UI for word vector arithmetic."""
+    from webui import run_webui
+    run_webui(checkpoint_path, host=host, port=port)
 
 
 if __name__ == "__main__":
